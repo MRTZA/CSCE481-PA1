@@ -1,5 +1,7 @@
 #include <netdb.h>
+#include <sys/socket.h>
 #include <netinet/in.h>
+#include <arpa/inet.h>
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/time.h>
@@ -7,8 +9,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #include "interface.h"
 
+#define BUFFER_LENGTH    250
+#define DEBUG			 1
 
 /*
  * TODO: IMPLEMENT BELOW THREE FUNCTIONS
@@ -38,10 +43,21 @@ int main(int argc, char** argv)
 		display_reply(command, reply);
 		
 		touppercase(command, strlen(command) - 1);
+
 		if (strncmp(command, "JOIN", 4) == 0) {
 			printf("Now you are in the chatmode\n");
 			process_chatmode(argv[1], reply.port);
 		}
+
+		// if (strncmp(command, "LIST", 4) == 0) {
+		// 	int loop = 0;
+        //     while(reply.list_room[loop] != '\0') {
+        //         printf("%c", reply.list_room[loop]);
+        //         loop++;
+        //     }
+
+		// 	printf("\n");
+		// }
 	
 		close(sockfd);
     }
@@ -69,8 +85,25 @@ int connect_to(const char *host, const int port)
 	// so that other functions such as "process_command" can use it
 	// ------------------------------------------------------------
 
-    // below is just dummy code for compilation, remove it.
-	int sockfd = -1;
+    // Create the socket and store the file descriptor
+	int sockfd = socket(AF_INET, SOCK_STREAM, 0); 
+	if (sockfd < 0) 
+		perror("ERROR opening socket");
+	
+	// Connect to server
+	struct sockaddr_in serveraddr;
+
+	memset(&serveraddr, 0, sizeof(serveraddr));
+	serveraddr.sin_family      = AF_INET;
+	serveraddr.sin_port        = htons(port);
+	serveraddr.sin_addr.s_addr = inet_addr(host);
+
+
+	int err = connect(sockfd, (struct sockaddr *) &serveraddr, sizeof(serveraddr));
+	if(err ==0) { 
+		printf("Connection Successfull\n");
+	}
+
 	return sockfd;
 }
 
@@ -103,14 +136,17 @@ struct Reply process_command(const int sockfd, char* command)
 	// 
 	// - CREATE/DELETE/JOIN and "<name>" are separated by one space.
 	// ------------------------------------------------------------
-
+	char buffer[100];
+	strcpy(buffer, command);
 
 	// ------------------------------------------------------------
 	// GUIDE 2:
 	// After you create the message, you need to send it to the
 	// server and receive a result from the server.
 	// ------------------------------------------------------------
-
+	int rc = send(sockfd, buffer, sizeof(buffer), 0);
+	// test error rc < 0
+	if(rc < 0) { perror("Send Unsucessfull"); }
 
 	// ------------------------------------------------------------
 	// GUIDE 3:
@@ -156,9 +192,41 @@ struct Reply process_command(const int sockfd, char* command)
 
 	// REMOVE below code and write your own Reply.
 	struct Reply reply;
-	reply.status = SUCCESS;
-	reply.num_member = 5;
-	reply.port = 1024;
+
+	if(strncmp(buffer, "JOIN", 4) == 0) {
+		reply.status = SUCCESS;
+		reply.num_member = 5;
+		reply.port = 1024;
+    }
+    else if(strncmp(buffer, "CREATE", 6) == 0) {
+		char status[BUFFER_LENGTH];
+        rc = recv(sockfd, status, sizeof(status), 0);
+        // test error rc < 0 or rc == 0 or   rc < sizeof(buffer
+        if(rc < 0) {
+            perror("Failed to recieve on socket");
+        }   
+
+		// TODO: Get actual status
+		reply.status = SUCCESS;
+    }
+    else if(strncmp(buffer, "DELETE", 6) == 0) {
+
+    }
+    else if(strncmp(buffer, "LIST", 4) == 0) {
+		char list[BUFFER_LENGTH];
+        rc = recv(sockfd, list, sizeof(list), 0);
+        // test error rc < 0 or rc == 0 or   rc < sizeof(buffer
+        if(rc < 0) {
+            perror("Failed to recieve on socket");
+        }   
+
+		reply.status = SUCCESS;
+		strcpy(reply.list_room, list);
+    }
+    else {
+        reply.status = SUCCESS;
+    }
+
 	return reply;
 }
 
