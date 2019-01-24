@@ -6,6 +6,8 @@
 #include <sys/types.h>
 #include <sys/time.h>
 
+#include <string>
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -44,20 +46,10 @@ int main(int argc, char** argv)
 		
 		touppercase(command, strlen(command) - 1);
 
-		if (strncmp(command, "JOIN", 4) == 0) {
+		if (strncmp(command, "JOIN ", 5) == 0) {
 			printf("Now you are in the chatmode\n");
 			process_chatmode(argv[1], reply.port);
 		}
-
-		// if (strncmp(command, "LIST", 4) == 0) {
-		// 	int loop = 0;
-        //     while(reply.list_room[loop] != '\0') {
-        //         printf("%c", reply.list_room[loop]);
-        //         loop++;
-        //     }
-
-		// 	printf("\n");
-		// }
 	
 		close(sockfd);
     }
@@ -90,7 +82,7 @@ int connect_to(const char *host, const int port)
 	if (sockfd < 0) 
 		perror("ERROR opening socket");
 	
-	// Connect to server
+	// Populate the server connection data
 	struct sockaddr_in serveraddr;
 
 	memset(&serveraddr, 0, sizeof(serveraddr));
@@ -98,7 +90,7 @@ int connect_to(const char *host, const int port)
 	serveraddr.sin_port        = htons(port);
 	serveraddr.sin_addr.s_addr = inet_addr(host);
 
-
+	// Connect to the server
 	int err = connect(sockfd, (struct sockaddr *) &serveraddr, sizeof(serveraddr));
 	if(err ==0) { 
 		printf("Connection Successfull\n");
@@ -136,7 +128,9 @@ struct Reply process_command(const int sockfd, char* command)
 	// 
 	// - CREATE/DELETE/JOIN and "<name>" are separated by one space.
 	// ------------------------------------------------------------
-	char buffer[100];
+	
+	// Type cast the command info properly for the send() function
+	char buffer[BUFFER_LENGTH];
 	strcpy(buffer, command);
 
 	// ------------------------------------------------------------
@@ -191,27 +185,65 @@ struct Reply process_command(const int sockfd, char* command)
 	// ------------------------------------------------------------
 
 	// REMOVE below code and write your own Reply.
+
+	// Reply struct that needs to be populated
 	struct Reply reply;
 
-	if(strncmp(buffer, "JOIN", 4) == 0) {
+	// JOIN
+	if(strncmp(buffer, "JOIN ", 5) == 0) {
 		reply.status = SUCCESS;
 		reply.num_member = 5;
 		reply.port = 1024;
     }
-    else if(strncmp(buffer, "CREATE", 6) == 0) {
-		char status[BUFFER_LENGTH];
-        rc = recv(sockfd, status, sizeof(status), 0);
+
+	// CREATE
+    else if(strncmp(buffer, "CREATE ", 7) == 0) {
+		char charStatus[BUFFER_LENGTH];
+        rc = recv(sockfd, charStatus, sizeof(charStatus), 0);
         // test error rc < 0 or rc == 0 or   rc < sizeof(buffer
         if(rc < 0) {
             perror("Failed to recieve on socket");
-        }   
+        }
 
-		// TODO: Get actual status
-		reply.status = SUCCESS;
+		// Get and set status
+		std::string status(charStatus);
+		if(status == "FAILURE_ALREADY_EXISTS") {
+			reply.status = FAILURE_ALREADY_EXISTS;
+		}
+		else if(status == "FAILURE_INVALID") {
+			reply.status = FAILURE_INVALID;
+		}
+		else if(status == "SUCCESS") {
+			reply.status = SUCCESS;
+		}
+		else {
+			reply.status = FAILURE_UNKNOWN;
+		}
     }
-    else if(strncmp(buffer, "DELETE", 6) == 0) {
 
+	// DELETE
+    else if(strncmp(buffer, "DELETE ", 7) == 0) {
+		char charStatus[BUFFER_LENGTH];
+        rc = recv(sockfd, charStatus, sizeof(charStatus), 0);
+        // test error rc < 0 or rc == 0 or   rc < sizeof(buffer
+        if(rc < 0) {
+            perror("Failed to recieve on socket");
+        }
+
+		// Get and set status
+		std::string status(charStatus);
+		if(status == "FAILURE_NOT_EXISTS") {
+			reply.status = FAILURE_NOT_EXISTS;
+		}
+		else if(status == "SUCCESS") {
+			reply.status = SUCCESS;
+		}
+		else {
+			reply.status = FAILURE_UNKNOWN;
+		}
     }
+
+	// LIST
     else if(strncmp(buffer, "LIST", 4) == 0) {
 		char list[BUFFER_LENGTH];
         rc = recv(sockfd, list, sizeof(list), 0);
@@ -220,11 +252,14 @@ struct Reply process_command(const int sockfd, char* command)
             perror("Failed to recieve on socket");
         }   
 
+		// Populate reply struct
 		reply.status = SUCCESS;
 		strcpy(reply.list_room, list);
     }
+
+	// Other for testing purposes
     else {
-        reply.status = SUCCESS;
+        reply.status = FAILURE_INVALID;
     }
 
 	return reply;
