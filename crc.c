@@ -7,6 +7,8 @@
 #include <sys/time.h>
 
 #include <string>
+#include <iostream>
+#include <bits/stdc++.h> 
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,6 +18,9 @@
 
 #define BUFFER_LENGTH    250
 #define DEBUG			 1
+
+using std::cout;
+using std::endl;
 
 /*
  * TODO: IMPLEMENT BELOW THREE FUNCTIONS
@@ -47,8 +52,10 @@ int main(int argc, char** argv)
 		touppercase(command, strlen(command) - 1);
 
 		if (strncmp(command, "JOIN ", 5) == 0) {
-			printf("Now you are in the chatmode\n");
-			process_chatmode(argv[1], reply.port);
+			if(reply.status == SUCCESS) {
+				printf("Now you are in the chatmode\n");
+				process_chatmode(argv[1], reply.port);
+			}
 		}
 	
 		close(sockfd);
@@ -191,9 +198,40 @@ struct Reply process_command(const int sockfd, char* command)
 
 	// JOIN
 	if(strncmp(buffer, "JOIN ", 5) == 0) {
-		reply.status = SUCCESS;
-		reply.num_member = 5;
-		reply.port = 1024;
+		char charStatus[BUFFER_LENGTH];
+		rc = recv(sockfd, charStatus, sizeof(charStatus), 0);
+		std::string replyInfo(charStatus);
+		
+		std::vector <std::string> tokens; 
+      
+		// stringstream class check1 
+		std::stringstream check1(replyInfo); 
+		std::string intermediate;  
+		// Tokenizing w.r.t. space ' ' 
+		while(getline(check1, intermediate, ',')) 
+		{ 
+			tokens.push_back(intermediate); 
+		}
+		
+		// Get and set status
+		std::string status(tokens.front());
+		if(status == "FAILURE_NOT_EXISTS") {
+			reply.status = FAILURE_ALREADY_EXISTS;
+			reply.port = -1;
+			reply.num_member = -1;
+		}
+		else if(status == "SUCCESS") {
+			reply.status = SUCCESS;
+			close(sockfd);
+			reply.port = std::stoi(tokens.at(1));
+			reply.num_member = std::stoi(tokens.at(2));
+		}
+		else {
+			reply.status = FAILURE_UNKNOWN;
+			reply.port = -1;
+			reply.num_member = -1;
+		}
+		
     }
 
 	// CREATE
@@ -279,7 +317,23 @@ void process_chatmode(const char* host, const int port)
 	// to the server using host and port.
 	// You may re-use the function "connect_to".
 	// ------------------------------------------------------------
+	int sockfd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0); 
+	if (sockfd < 0) 
+		perror("ERROR opening socket");
+	
+	// Populate the server connection data
+	struct sockaddr_in serveraddr;
 
+	memset(&serveraddr, 0, sizeof(serveraddr));
+	serveraddr.sin_family      = AF_INET;
+	serveraddr.sin_port        = htons(port);
+	serveraddr.sin_addr.s_addr = inet_addr(host);
+
+	// Connect to the server
+	int err = connect(sockfd, (struct sockaddr *) &serveraddr, sizeof(serveraddr));
+	if(err == 0) { 
+		printf("Connection Successfull\n");
+	}
 	// ------------------------------------------------------------
 	// GUIDE 2:
 	// Once the client have been connected to the server, we need
@@ -287,7 +341,25 @@ void process_chatmode(const char* host, const int port)
 	// At the same time, the client should wait for a message from
 	// the server.
 	// ------------------------------------------------------------
-	
+	char userMsg[BUFFER_LENGTH];
+	char otherMsg[BUFFER_LENGTH];
+	cout << "got here" << endl;
+	for(;;) {
+		err = recv(sockfd, otherMsg, sizeof(otherMsg), 0);
+		if(errno == EAGAIN || errno == EWOULDBLOCK) { 
+		} else if (err < 0) {
+			perror("Failed to recv\n");
+		} else { // print the msg we got from server
+			display_message(otherMsg);
+		}
+		get_message(userMsg, BUFFER_LENGTH);
+		err = send(sockfd, userMsg, sizeof(userMsg), 0);
+		if(err < 0) {
+			perror("Failed to send msg\n");
+		}
+		
+		
+	}
     // ------------------------------------------------------------
     // IMPORTANT NOTICE:
     // 1. To get a message from a user, you should use a function

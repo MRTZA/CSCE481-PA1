@@ -7,7 +7,9 @@
 #include <sys/time.h>
 #include <string>
 #include <vector>
-
+#include <pthread.h>
+#include <iostream>
+#include <sys/select.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,25 +22,128 @@
 #define NAME_LIMIT        32
 #define MAX_CHATROOMS     16
 #define FALSE              0
-#define DEBUG              0
+#define DEBUG              1
+#define MAX_BACKLOG		  10
+
+using std::cout;
+using std::endl;
 
 // struct to store chatroom data
 struct chatroom_data {
     int sockfd;
     int port;
+	int num_members;
     char name[NAME_LIMIT];
     int isActive = 0; // 0 - Inactive, 1 - Active
     struct sockaddr_in serveraddr;
+	pthread_t chatroom_thread;
 };
 
 // Global Variables
 std::vector<chatroom_data> cdata;
 std::vector<int> availablePorts;
 
-/* 0 - Failure, 1 - Success */
+// Creates the master socket
+int passiveTCPsock(int port, int backlog, bool isBlocking) {
+	
+	// Create the master socket assumes IPv4 and TCP connection
+	int m_sock;
+	int rc = 1;
+	struct sockaddr_in serveraddr;
+	if(isBlocking) {
+		m_sock = socket(AF_INET, SOCK_STREAM, 0);
+	} else {
+		m_sock = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
+	}
+	// test error m_sock< 0
+	if(m_sock < 0) {
+		perror("Failed to create socket");
+	} 
+	
+	// Creates serveraddr with default ip and port
+	// Might want to change this to be more flexible
+	memset(&serveraddr, 0, sizeof(serveraddr));
+	serveraddr.sin_family      = AF_INET;
+	serveraddr.sin_port        = htons(port);
+	serveraddr.sin_addr.s_addr = inet_addr(SERVER_ADDR);
+	
+	// Bind the master socket to the serveraddr
+	rc = bind(m_sock, (struct sockaddr *)&serveraddr, sizeof(serveraddr));
+	// test error rc < 0
+	if(rc < 0) {
+		perror("Failed to bind socket");
+	}
+	
+	// Listen for incoming connections with a limit of #backlog waiting connections
+	rc = listen(m_sock, backlog);
+	// test error rc< 0
+	if(rc < 0) {
+		perror("Failed to listen on socket");
+	} 
+	
+	//Returned master socket will contain connections that we are able to wait on.
+	return m_sock;
+}
 
+// Handles all the chat rooms and whatnot
+void* chat_room_thread(void* chat_room_information) {
+	//Get our chat room information
+	struct chatroom_data* chatInfo = (chatroom_data*) chat_room_information;
+	
+	// Allow the thread to be cancelable for when DELETE gets called on it
+	pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
+	
+	// Get the chatroom name in string form
+	std::string chatroomName(chatInfo->name);
+	
+	//Create a passive TCP socket for this specific chat room
+	char buffer[BUFFER_LENGTH];
+	int m_sock, s_sock, rc;
+	int fdmax = -1;
+	std::vector<int> sockets;
+	
+	m_sock = passiveTCPsock(chatInfo->port, MAX_BACKLOG, false);
+	fd_set readset, readset_backup;
+	for(;;) {
+		s_sock = accept(m_sock, NULL, NULL);
+		if (s_sock == EAGAIN || s_sock == EWOULDBLOCK) { // There are no new connections to accept() on
+			// Add the new socket to our read set
+			FD_SET(s_sock, &readset);
+			if(s_sock > fdmax)
+				fdmax = s_sock;
+			sockets.push_back(s_sock);
+		} else if (s_sock < 0) { // Check if connection failed some other way
+			perror("Failed to accept socket");
+		}
+		
+		//readset_backup = readset; // make sure we get a copy of the readset before it's detroyed
+		FD_ZERO(&readset);
+		int fd_to_read = select(fdmax + 1, &readset, NULL, NULL, NULL);
+		
+		//readset = readset_backup;
+		
+		// For each socket check if it is set
+		for(auto & socket1 : sockets ) {
+			if(FD_ISSET(socket1, &readset)) {
+				// If the socket is set then receive it's msg and send it on all other sockets
+				rc = recv(s_sock, buffer, sizeof(buffer), 0);
+				std::string message(buffer);
+				cout << "Server Message: " << buffer << endl;
+				for( auto & socket2 : sockets) {
+					if( socket1 != socket2) {
+						rc = send(socket2, buffer, sizeof(buffer), 0);
+					}
+				}
+			}
+		}
+	}
+
+	pthread_exit(NULL);
+}
+
+/* 0 - Failure, 1 - Success */
 // CREATE
-int createCommand(char buffer[BUFFER_LENGTH], int sd2) {
+int createCommand(char buffer[BUFFER_LENGTH], int s_sock) {
     if(cdata.size() < MAX_CHATROOMS) { // Can allow more chatrooms
         // Get the chatroom name
         char subbuff[NAME_LIMIT];
@@ -55,7 +160,7 @@ int createCommand(char buffer[BUFFER_LENGTH], int sd2) {
                 char msgChar[BUFFER_LENGTH];
                 strcpy(msgChar, msg.c_str());
 
-                int rc = send(sd2, msgChar, sizeof(msgChar), 0);
+                int rc = send(s_sock, msgChar, sizeof(msgChar), 0);
                 // test error rc < 0
                 if(rc < 0) {
                     perror("Failed to reply: CREATE Command");
@@ -89,6 +194,7 @@ int createCommand(char buffer[BUFFER_LENGTH], int sd2) {
         strcpy(temp.name, subbuff);
         temp.isActive = 1;
         temp.serveraddr = serveraddr;
+		temp.num_members = 0;
 
         cdata.push_back(temp);
 
@@ -98,11 +204,14 @@ int createCommand(char buffer[BUFFER_LENGTH], int sd2) {
         char msgChar[BUFFER_LENGTH];
         strcpy(msgChar, msg.c_str());
 
-        int rc = send(sd2, msgChar, sizeof(msgChar), 0);
+        int rc = send(s_sock, msgChar, sizeof(msgChar), 0);
         // test error rc < 0
         if(rc < 0) {
             perror("Failed to reply: CREATE Command");
         }
+		
+		//If all of the above succeeds then we want to launch the chatroom thread here
+		pthread_create(&cdata.back().chatroom_thread, NULL, chat_room_thread, &cdata.back()); 
 
     } else {
         // TODO: Error Handling
@@ -110,7 +219,7 @@ int createCommand(char buffer[BUFFER_LENGTH], int sd2) {
         char msgChar[BUFFER_LENGTH];
         strcpy(msgChar, msg.c_str());
 
-        int rc = send(sd2, msgChar, sizeof(msgChar), 0);
+        int rc = send(s_sock, msgChar, sizeof(msgChar), 0);
         // test error rc < 0
         if(rc < 0) {
             perror("Failed to reply: CREATE Command");
@@ -123,13 +232,61 @@ int createCommand(char buffer[BUFFER_LENGTH], int sd2) {
 }
 
 // JOIN
-int joinCommand(char buffer[BUFFER_LENGTH], int sd2) {
+int joinCommand(char buffer[BUFFER_LENGTH], int s_sock) {
+	// Get the chatroom name
+	char subbuff[NAME_LIMIT];
+	memcpy(subbuff, &buffer[5], NAME_LIMIT-1);
+	subbuff[NAME_LIMIT-1] = '\0';
 
+	// Convert name to string
+	std::string targetName(subbuff);
+	
+	//Check if that name even exists
+	int targetPos = -1;
+	for(int i = 0; i < cdata.size(); i++) {
+		std::string chatroomName(cdata.at(i).name);
+		if(chatroomName == targetName) {
+			targetPos = i;
+		}
+	}
+	
+	// if the room exists we can join it
+	
+	if(targetPos > -1) {
+		// send back a reply with the information that the client needs to connect
+		// success status, port, num_members 
+		cdata.at(targetPos).num_members += 1;
+		std::string msg("SUCCESS");
+		msg += ",";
+		msg += std::to_string(cdata.at(targetPos).port);
+		msg += ",";
+		msg += std::to_string(cdata.at(targetPos).num_members);
+		cout << msg << endl;
+		
+		char msgChar[BUFFER_LENGTH];
+		strcpy(msgChar, msg.c_str());
+		
+		int rc = send(s_sock, msgChar, sizeof(msgChar), 0);
+		
+	} else { //Chat room isn't found
+		printf("Chat room cannot be joined...\n");
+
+        std::string msg = "FAILED_TO_JOIN";
+        char msgChar[BUFFER_LENGTH];
+        strcpy(msgChar, msg.c_str());
+
+        int rc = send(s_sock, msgChar, sizeof(msgChar), 0);
+        // test error rc < 0
+        if(rc < 0) {
+            perror("Failed to reply: LIST Command");
+        }
+	}
+	
     return 1;
 }
 
 // DELETE
-int deleteCommand(char buffer[BUFFER_LENGTH], int sd2) {
+int deleteCommand(char buffer[BUFFER_LENGTH], int s_sock) {
     // Initialize reply to failure
     std::string msgFail = "FAILURE_NOT_EXISTS";
     char msgFailChar[BUFFER_LENGTH];
@@ -137,7 +294,7 @@ int deleteCommand(char buffer[BUFFER_LENGTH], int sd2) {
 
     // check if there are any chatrooms to even delete
     if(cdata.size() == 0) {
-        int rc = send(sd2, msgFailChar, sizeof(msgFailChar), 0);
+        int rc = send(s_sock, msgFailChar, sizeof(msgFailChar), 0);
         // test error rc < 0
         if(rc < 0) {
             perror("Failed to reply: DELETE Command");
@@ -170,7 +327,7 @@ int deleteCommand(char buffer[BUFFER_LENGTH], int sd2) {
             char msgChar[BUFFER_LENGTH];
             strcpy(msgChar, msg.c_str());
 
-            int rc = send(sd2, msgChar, sizeof(msgChar), 0);
+            int rc = send(s_sock, msgChar, sizeof(msgChar), 0);
             // test error rc < 0
             if(rc < 0) {
                 perror("Failed to reply: CREATE Command");
@@ -180,7 +337,7 @@ int deleteCommand(char buffer[BUFFER_LENGTH], int sd2) {
         }
     }
 
-    int rc = send(sd2, msgFailChar, sizeof(msgFailChar), 0);
+    int rc = send(s_sock, msgFailChar, sizeof(msgFailChar), 0);
     // test error rc < 0
     if(rc < 0) {
         perror("Failed to reply: DELETE Command");
@@ -190,7 +347,7 @@ int deleteCommand(char buffer[BUFFER_LENGTH], int sd2) {
 }
 
 // LIST
-int listCommand(char buffer[BUFFER_LENGTH], int sd2) {
+int listCommand(char buffer[BUFFER_LENGTH], int s_sock) {
     // Check if there are any chatrooms
     if(cdata.size() > 0) {
         // Build reply string
@@ -215,7 +372,7 @@ int listCommand(char buffer[BUFFER_LENGTH], int sd2) {
         }
         printf("\n");
 
-        int rc = send(sd2, msgChar, sizeof(msgChar), 0);
+        int rc = send(s_sock, msgChar, sizeof(msgChar), 0);
         // test error rc < 0
         if(rc < 0) {
             perror("Failed to reply: LIST Command");
@@ -228,7 +385,7 @@ int listCommand(char buffer[BUFFER_LENGTH], int sd2) {
         char msgChar[BUFFER_LENGTH];
         strcpy(msgChar, msg.c_str());
 
-        int rc = send(sd2, msgChar, sizeof(msgChar), 0);
+        int rc = send(s_sock, msgChar, sizeof(msgChar), 0);
         // test error rc < 0
         if(rc < 0) {
             perror("Failed to reply: LIST Command");
@@ -238,19 +395,20 @@ int listCommand(char buffer[BUFFER_LENGTH], int sd2) {
     return 1;
 }
 
-int identifyCommand(char buffer[BUFFER_LENGTH], int sd2) {
+// Identifies what command the client sent
+int identifyCommand(char buffer[BUFFER_LENGTH], int s_sock) {
 
     if(strncmp(buffer, "JOIN ", 5) == 0) {
-        joinCommand(buffer, sd2);
+        joinCommand(buffer, s_sock);
     }
     else if(strncmp(buffer, "CREATE ", 7) == 0) {
-        createCommand(buffer, sd2);
+        createCommand(buffer, s_sock);
     }
     else if(strncmp(buffer, "DELETE ", 7) == 0) {
-        deleteCommand(buffer, sd2);
+        deleteCommand(buffer, s_sock);
     }
     else if(strncmp(buffer, "LIST", 4) == 0) {
-        listCommand(buffer, sd2);
+        listCommand(buffer, s_sock);
     }
     else {
         // Error Handling:
@@ -262,95 +420,62 @@ int identifyCommand(char buffer[BUFFER_LENGTH], int sd2) {
 }
 
 int main() {
-    int    sd=-1, sd2=-1;
-    int    rc, length, on=1;
+    int    m_sock = -1, s_sock = -1;
+    int    rc, length, on = 1;
     char   buffer[BUFFER_LENGTH];
-    fd_set read_fd;
     struct timeval timeout;
     struct sockaddr_in serveraddr;
+	std::vector<pthread_t> chatroom_threads;
 
     // Populate available ports w/ 3006->3022
     for(int i = 0; i < MAX_CHATROOMS; i++) {
         availablePorts.push_back(3006+i);
     }
+	
+	// Creates a master socket that listens for connections up to argument amount
+	m_sock = passiveTCPsock(SERVER_PORT, MAX_BACKLOG, true);
+	
+	printf("Ready for client connect().\n");
+	
+	// Main server loop
+	for(;;) {
+		// Create our slave socket
+		s_sock = accept(m_sock, NULL, NULL);
+		if(s_sock < 0) {
+			perror("Failed to accept socket");
+		}
+		
+		// Receive information from client
+		rc = recv(s_sock, buffer, sizeof(buffer), 0);
+		// test error rc < 0
+		if(rc < 0) {
+			perror("Failed to receive on socket");
+		}
+		
+		if (DEBUG) {
+			printf("Printing...\n");
 
-    do {
-        sd = socket(AF_INET, SOCK_STREAM, 0);
-        // test error sd< 0
-        if(sd < 0) {
-            perror("Failed to create socket");
-        }   
+			int loop = 0;
+			while(buffer[loop] != '\0') {
+				printf("%c", buffer[loop]);
+				loop++;
+			}
 
-        memset(&serveraddr, 0, sizeof(serveraddr));
-        serveraddr.sin_family      = AF_INET;
-        serveraddr.sin_port        = htons(SERVER_PORT);
-        serveraddr.sin_addr.s_addr = inet_addr(SERVER_ADDR);
+			printf("\n");
+		}
+		
+		// Always identify the command with the slave socket
+		identifyCommand(buffer, s_sock);
+		
+		close(s_sock);
+	
+	}
 
-        rc = bind(sd, (struct sockaddr *)&serveraddr, sizeof(serveraddr));
-        // test error rc < 0
-        if(rc < 0) {
-            perror("Failed to bind socket");
-        }  
-
-        rc = listen(sd, 10);
-        // test error rc< 0
-        if(rc < 0) {
-            perror("Failed to listen on socket");
-        }   
-
-        printf("Ready for client connect().\n");
-
-        for(;;) {
-            sd2 = accept(sd, NULL, NULL);
-            // test error sd2 < 0
-            if(sd2 < 0) {
-                perror("Failed to accept socket");
-            }   
-
-            timeout.tv_sec  = 30;
-            timeout.tv_usec = 0;
-
-            FD_ZERO(&read_fd);
-            FD_SET(sd2, &read_fd);
-
-            rc = select(sd2+1, &read_fd, NULL, NULL, &timeout);
-            // test error rc < 0
-            if(rc < 0) {
-                perror("Failed to select socket");
-            }   
-
-            length = BUFFER_LENGTH;
-
-            if (DEBUG) {
-                printf("Attempting to recieve msg\n");
-            }
-            rc = recv(sd2, buffer, sizeof(buffer), 0);
-            // test error rc < 0 or rc == 0 or   rc < sizeof(buffer
-            if(rc < 0) {
-                perror("Failed to recieve on socket");
-            }   
-
-            identifyCommand(buffer, sd2);
-
-            if (DEBUG) {
-                printf("Printing...\n");
-
-                int loop = 0;
-                while(buffer[loop] != '\0') {
-                    printf("%c", buffer[loop]);
-                    loop++;
-                }
-
-                printf("\n");
-            }
-        }
-
-    } while (FALSE);
-
-    if (sd != -1)
-    close(sd);
-    if (sd2 != -1)
-    close(sd2);
+	
+    if (m_sock != -1)
+    close(m_sock);
+    if (s_sock != -1)
+    close(s_sock);
 
     return 0;
 }
