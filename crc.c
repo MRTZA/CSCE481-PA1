@@ -28,6 +28,7 @@ using std::endl;
 int connect_to(const char *host, const int port);
 struct Reply process_command(const int sockfd, char* command);
 void process_chatmode(const char* host, const int port);
+bool process_chatmode_run = true;
 
 int main(int argc, char** argv) 
 {
@@ -40,7 +41,8 @@ int main(int argc, char** argv)
     display_title();
     
 	while (1) {
-	
+		
+
 		int sockfd = connect_to(argv[1], atoi(argv[2]));
     
 		char command[MAX_DATA];
@@ -59,6 +61,7 @@ int main(int argc, char** argv)
 		}
 	
 		close(sockfd);
+
     }
 
     return 0;
@@ -222,7 +225,6 @@ struct Reply process_command(const int sockfd, char* command)
 		}
 		else if(status == "SUCCESS") {
 			reply.status = SUCCESS;
-			close(sockfd);
 			reply.port = std::stoi(tokens.at(1));
 			reply.num_member = std::stoi(tokens.at(2));
 		}
@@ -300,6 +302,7 @@ struct Reply process_command(const int sockfd, char* command)
         reply.status = FAILURE_INVALID;
     }
 
+	close(sockfd);
 	return reply;
 }
 
@@ -308,7 +311,50 @@ struct Reply process_command(const int sockfd, char* command)
  * 
  * @parameter host     host address
  * @parameter port     port
- */
+*/
+
+struct sockStruct {
+	int sock;
+};
+
+
+void* recvThreadFunction(void* socket) {
+	pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
+	sockStruct *sockfd = static_cast<sockStruct*>(socket);
+	char otherMsg[BUFFER_LENGTH];
+	int err;
+	for(;;) {
+		err = recv(sockfd->sock, otherMsg, sizeof(otherMsg), 0);
+		if(err < 0) {
+			perror("Failed to recv msg\n");
+		}
+		display_message(otherMsg);
+		std::string msg(otherMsg);
+		if(msg == "Warning the chat room is now closing...") {
+			process_chatmode_run = false;
+			close(sockfd->sock);
+			pthread_exit(NULL);
+		}
+	}
+}
+
+ 
+void* sendThreadFunction(void* socket) {
+	pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
+	sockStruct *sockfd = static_cast<sockStruct*>(socket);
+	char userMsg[BUFFER_LENGTH];
+	int err;
+	for(;;) {
+		get_message(userMsg, BUFFER_LENGTH);
+		std::string msg(userMsg);
+		err = send(sockfd->sock, userMsg, sizeof(userMsg), 0);
+		if(err < 0) {
+			perror("Failed to send msg\n");
+		}
+	} 
+}
+
+
 void process_chatmode(const char* host, const int port)
 {
 	// ------------------------------------------------------------
@@ -317,7 +363,11 @@ void process_chatmode(const char* host, const int port)
 	// to the server using host and port.
 	// You may re-use the function "connect_to".
 	// ------------------------------------------------------------
-	int sockfd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0); 
+	//int sockfd = socket(AF_INET, SOCK_STREAM, 0); 
+	pthread_t recvThread;
+	pthread_t sendThread;
+	
+	int sockfd = socket(AF_INET, SOCK_STREAM, 0); 
 	if (sockfd < 0) 
 		perror("ERROR opening socket");
 	
@@ -341,25 +391,16 @@ void process_chatmode(const char* host, const int port)
 	// At the same time, the client should wait for a message from
 	// the server.
 	// ------------------------------------------------------------
-	char userMsg[BUFFER_LENGTH];
-	char otherMsg[BUFFER_LENGTH];
-	cout << "got here" << endl;
-	for(;;) {
-		err = recv(sockfd, otherMsg, sizeof(otherMsg), 0);
-		if(errno == EAGAIN || errno == EWOULDBLOCK) { 
-		} else if (err < 0) {
-			perror("Failed to recv\n");
-		} else { // print the msg we got from server
-			display_message(otherMsg);
-		}
-		get_message(userMsg, BUFFER_LENGTH);
-		err = send(sockfd, userMsg, sizeof(userMsg), 0);
-		if(err < 0) {
-			perror("Failed to send msg\n");
-		}
-		
-		
+	sockStruct *data = new sockStruct();
+	data->sock = sockfd;
+	
+	pthread_create(&recvThread, NULL, recvThreadFunction, (void*)data);
+	pthread_create(&sendThread, NULL, sendThreadFunction, (void*)data);
+	while(process_chatmode_run) {
 	}
+	//pthread_cancel(recvThread);
+	pthread_cancel(sendThread);
+	return;
     // ------------------------------------------------------------
     // IMPORTANT NOTICE:
     // 1. To get a message from a user, you should use a function

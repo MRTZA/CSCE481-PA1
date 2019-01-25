@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <sys/poll.h>
 #include "interface.h"
 
 #define SERVER_PORT     3005
@@ -24,6 +25,7 @@
 #define FALSE              0
 #define DEBUG              1
 #define MAX_BACKLOG		  10
+#define CHAT_LIMIT		  10
 
 using std::cout;
 using std::endl;
@@ -98,40 +100,97 @@ void* chat_room_thread(void* chat_room_information) {
 	
 	//Create a passive TCP socket for this specific chat room
 	char buffer[BUFFER_LENGTH];
-	int m_sock, s_sock, rc;
+	int m_sock, s_sock, rc, sd;
 	int fdmax = -1;
 	std::vector<int> sockets;
 	
+	cout << "Launching chatroom: " << chatroomName << endl;
+	
 	m_sock = passiveTCPsock(chatInfo->port, MAX_BACKLOG, false);
+	
+	cout << "Master socket created" << endl;
+	
 	fd_set readset, readset_backup;
+	
 	for(;;) {
-		s_sock = accept(m_sock, NULL, NULL);
-		if (s_sock == EAGAIN || s_sock == EWOULDBLOCK) { // There are no new connections to accept() on
-			// Add the new socket to our read set
-			FD_SET(s_sock, &readset);
-			if(s_sock > fdmax)
-				fdmax = s_sock;
-			sockets.push_back(s_sock);
-		} else if (s_sock < 0) { // Check if connection failed some other way
-			perror("Failed to accept socket");
+		
+		if(!chatInfo->isActive) {
+			for(int i = 0; i < cdata.size(); i++) {
+				std::string name(cdata.at(i).name);
+				if(chatroomName == name) {
+					int port = cdata.at(i).port;
+					// Close the connection
+					close(cdata.at(i).sockfd);
+					// Remove the chat room from the list
+					cdata.erase(cdata.begin() + i);
+					// Make the port available again
+					availablePorts.push_back(port);
+				}
+			}
+			for(auto & socket : sockets) {
+				strcpy(buffer, "Warning the chat room is now closing...");
+				rc = send(socket, buffer, sizeof(buffer), 0);
+				if(rc < 0) {
+					perror("Failed to send\n");
+				}
+				close(socket);
+				pthread_exit(NULL);
+				return NULL;
+			}
 		}
 		
-		//readset_backup = readset; // make sure we get a copy of the readset before it's detroyed
 		FD_ZERO(&readset);
-		int fd_to_read = select(fdmax + 1, &readset, NULL, NULL, NULL);
 		
-		//readset = readset_backup;
+		FD_SET(m_sock, &readset);
+		fdmax = m_sock;
+		
+		for(auto & sock : sockets) {
+			sd = sock;
+			if(sd > 0)
+				FD_SET(sd, &readset);
+			
+			if(sd > fdmax)
+				fdmax = sd;
+		}
+		
+		rc = select(fdmax + 1, &readset, NULL, NULL, NULL);
+		
+		if(rc < 0 && errno != EINTR) {
+			perror("select error occurred\n");
+		}
+		
+		if(FD_ISSET(m_sock, &readset)) {
+			s_sock = accept(m_sock, NULL, NULL);
+			if (s_sock == EAGAIN || s_sock == EWOULDBLOCK) { 
+			// There are no new connections to accept() on
+			} else { 
+				// We have new connection to add
+				// Add the new socket to our read set
+				cout << "Adding a connection" << endl;
+				sockets.push_back(s_sock);
+			}
+		}
 		
 		// For each socket check if it is set
+		//cout << "Checking is sockets have stuff to read" << endl;
 		for(auto & socket1 : sockets ) {
 			if(FD_ISSET(socket1, &readset)) {
 				// If the socket is set then receive it's msg and send it on all other sockets
-				rc = recv(s_sock, buffer, sizeof(buffer), 0);
+				rc = recv(socket1, buffer, sizeof(buffer), 0);
+				if(rc < 0) {
+					perror("Failed to receive message from the clients");
+				}
 				std::string message(buffer);
-				cout << "Server Message: " << buffer << endl;
+				message += "\n";
+				cout << "Server Message: " << message;
+				
 				for( auto & socket2 : sockets) {
 					if( socket1 != socket2) {
+						strcpy(buffer, message.c_str());
 						rc = send(socket2, buffer, sizeof(buffer), 0);
+						if(rc < 0) {
+							perror("Failed to send\n");
+						}
 					}
 				}
 			}
@@ -271,7 +330,7 @@ int joinCommand(char buffer[BUFFER_LENGTH], int s_sock) {
 	} else { //Chat room isn't found
 		printf("Chat room cannot be joined...\n");
 
-        std::string msg = "FAILED_TO_JOIN";
+        std::string msg = "FAILURE_NOT_EXISTS";
         char msgChar[BUFFER_LENGTH];
         strcpy(msgChar, msg.c_str());
 
@@ -313,19 +372,20 @@ int deleteCommand(char buffer[BUFFER_LENGTH], int s_sock) {
     for(int i = 0; i < cdata.size(); i++) {
         std::string name(cdata.at(i).name);
         if(str == name) {
-            int port = cdata.at(i).port;
-
-            // Close the connection
-            close(cdata.at(i).sockfd);
-            // Remove the chat room from the list
-            cdata.erase(cdata.begin() + i);
-
-            // Make the port available again
-            availablePorts.push_back(port);
-
+			cdata.at(i).isActive = false;
+            if(cdata.at(i).num_members == 0) {
+				int port = cdata.at(i).port;
+				// Close the connection
+				close(cdata.at(i).sockfd);
+				// Remove the chat room from the list
+				cdata.erase(cdata.begin() + i);
+				// Make the port available again
+				availablePorts.push_back(port);
+			}
             std::string msg = "SUCCESS";
             char msgChar[BUFFER_LENGTH];
             strcpy(msgChar, msg.c_str());
+			
 
             int rc = send(s_sock, msgChar, sizeof(msgChar), 0);
             // test error rc < 0
