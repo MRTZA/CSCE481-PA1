@@ -7,8 +7,10 @@
 #include <sys/time.h>
 
 #include <string>
+#include <vector>
+#include <sstream>
 #include <iostream>
-#include <bits/stdc++.h> 
+//#include <bits/stdc++.h> 
 
 #include <stdio.h>
 #include <stdlib.h>
